@@ -13,15 +13,66 @@ def cli():
 
 @cli.command('compose')
 @click.argument('num_nodes', type=int)
+@click.argument('num_faulty_nodes', type=int, default=0)
 @click.argument('topology_file', type=str, default='topologies/echo.yaml')
 @click.argument('algorithm', type=str, default='echo')
-@click.option('--template_file', type=str,  default='docker-compose.template.yml')
-@click.option('--overwrite_topology',is_flag=True, help='Overwrite the topology file. Useful for topologies that can be adjusted dynamically such as rings. Do not use this option if you have a static topology file that you want the preserve!')
-def compose(num_nodes, topology_file, algorithm, template_file, overwrite_topology):
-    prepare_compose_file(num_nodes, topology_file, algorithm, template_file, overwrite_topology=overwrite_topology)
+@click.option('--template_file', type=str, default='docker-compose.template.yml')
+@click.option('--overwrite_topology', is_flag=True,
+              help='Overwrite the topology file. Useful for topologies that can be adjusted dynamically such as rings. Do not use this option if you have a static topology file that you want the preserve!')
+def compose(num_nodes, num_faulty_nodes, topology_file, algorithm, template_file, overwrite_topology):
+    if algorithm == 'dolev':
+        prepare_compose_file_byzantine(num_nodes, num_faulty_nodes, topology_file, algorithm, template_file, overwrite_topology=True)
+    else:
+        prepare_compose_file(num_nodes, topology_file, algorithm, template_file, overwrite_topology=overwrite_topology)
 
 
-def prepare_compose_file(num_nodes, topology_file, algorithm, template_file, location='cs4545', overwrite_topology = False):
+def prepare_compose_file_byzantine(num_nodes, num_faulty_nodes, topology_file, algorithm, template_file,
+                                   location='cs4545', overwrite_topology=False):
+    if num_faulty_nodes >= num_nodes:
+        raise ValueError("Number of faulty nodes must be less than total number of nodes.")
+
+    with open(template_file, 'r') as f:
+        content = yaml.safe_load(f)
+
+        node = content['services']['node0']
+        content['x-common-variables']['TOPOLOGY'] = topology_file
+
+        nodes = {}
+        baseport = 9090
+        connections = {}
+
+        network_name = list(content['networks'].keys())[0]
+        subnet = content['networks'][network_name]['ipam']['config'][0]['subnet'].split('/')[0]
+        network_base = '.'.join(subnet.split('/')[0].split('.')[:-1])
+
+        # Ensure 2f+1 connections for each node
+        for i in range(num_nodes):
+            n = copy.deepcopy(node)
+            n['ports'] = [f'{baseport + i}:{baseport + i}']
+            n['networks'][network_name]['ipv4_address'] = f'{network_base}.{10 + i}'
+            n['environment']['PID'] = i
+            n['environment']['TOPOLOGY'] = topology_file
+            n['environment']['ALGORITHM'] = algorithm
+            n['environment']['LOCATION'] = location
+            nodes[f'node{i}'] = n
+
+            # Each node connects to 2f+1 other nodes
+            connections[i] = [(i + j + 1) % num_nodes for j in range(2 * num_faulty_nodes + 1)]
+
+        content['services'] = nodes
+
+        with open('docker-compose.yml', 'w') as f2:
+            yaml.safe_dump(content, f2)
+            print(f'Output written to docker-compose.yml')
+
+        if overwrite_topology:
+            with open(topology_file, 'w') as f3:
+                yaml.safe_dump(connections, f3)
+                print(f'Output written to {topology_file}')
+
+
+def prepare_compose_file(num_nodes, topology_file, algorithm, template_file, location='cs4545',
+                         overwrite_topology=False):
     with open(template_file, 'r') as f:
         content = yaml.safe_load(f)
 
